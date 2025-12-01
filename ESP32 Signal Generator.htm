@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta http-equiv="content-type" content="text/html; charset=UTF-8" />
+    <title>ESP32 Signal Generator</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link
+      rel="shortcut icon"
+      type="image/png"
+      sizes="16x16"
+      href="data:image/png;base64,iVBOR..."
+    />
+
+    <style>
+      /* (kept most of your original CSS - trimmed here for brevity in display) */
+      html {
+        width: 100% !important;
+        height: 100% !important;
+        font-family: Tahoma;
+        display: inline-block;
+        color: #38ab45;
+        margin: 0;
+      }
+      .controller {
+        margin: 1.75em auto auto auto;
+        width: 96%;
+      }
+      .step-button {
+        width: 40%;
+        text-align: center;
+      }
+      .button,
+      .step-button,
+      .nice-input,
+      .set-button,
+      #status,
+      .preset-button {
+        background-color: #38ab45;
+        border: none;
+        color: white;
+        padding: 0.1em 0.2em;
+        font-size: 2.5em;
+        font-weight: bold;
+      }
+      #live-values {
+        column-count: 2;
+        font-size: 1.5em;
+        font-weight: bold;
+        margin: 0.15em 0;
+        padding: 0 0.05em;
+      }
+      #waveforms {
+        padding-right: 0.15em;
+        column-count: 3;
+      }
+      #InfoDIV {
+        font-family: Consolas, monospace;
+        font-size: 80%;
+        color: #38ab45;
+        position: fixed;
+        padding: 0;
+        left: 9%;
+        top: 0.5em;
+        width: 85%;
+        height: 5em;
+        column-count: 3;
+        z-index: -1;
+      }
+      #preview-container {
+        margin: 1em auto;
+        width: 96%;
+        display: block;
+      }
+      #preview {
+        width: 100%;
+        height: 160px;
+        border-radius: 6px;
+        border: 1px solid #00778f;
+        background: #000;
+      }
+      #preview-controls {
+        display: flex;
+        gap: 0.5em;
+        align-items: center;
+        margin-top: 0.4em;
+      }
+      .small-btn {
+        padding: 0.2em 0.4em;
+        font-size: 0.85em;
+        border-radius: 0.15em;
+        background: #38ab45;
+        color: white;
+        border: none;
+      }
+      .small-btn:active {
+        background: #fff;
+        color: #8cacb3;
+      }
+      .preview-label {
+        font-size: 0.9em;
+        color: #38ab45;
+        margin-right: 0.5em;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="controller">
+      <div id="head">
+        <span id="header">ESP32 Signal Generator</span>&nbsp;<span id="version"
+          >v6.3.3.3</span
+        >
+      </div>
+
+      <div id="live-values">
+        <p id="frequencyVAL">Frequency: <span id="FreqValue">1kHz</span></p>
+        <p id="WaveModeVAL" class="right">
+          Wave: <span id="WaveForm">Square</span>
+        </p>
+      </div>
+
+      <!-- existing controls (unchanged) -->
+      <div>
+        <button id="DOWN" onclick="setDOWN()" class="step-button">DOWN</button>
+        <button
+          id="status"
+          onclick="getStatus()"
+          title="Get current status info"
+        >
+          ?
+        </button>
+        <button id="UP" onclick="setUP()" class="step-button">UP</button>
+      </div>
+
+      <!-- other controls omitted for brevity - keep your original controls here -->
+
+      <!-- PREVIEW CANVAS -->
+      <div
+        id="preview-container"
+        title="Live preview of the generated waveform"
+      >
+        <canvas id="preview"></canvas>
+        <div id="preview-controls">
+          <span class="preview-label">Preview:</span>
+          <button id="refreshPreview" class="small-btn" onclick="drawPreview()">
+            Refresh
+          </button>
+          <button id="toggleAuto" class="small-btn" onclick="toggleAuto()">
+            Auto: ON
+          </button>
+          <label style="margin-left: auto; font-size: 0.85em; color: #38ab45"
+            >Cycles:
+            <select id="previewCycles" onchange="drawPreview()">
+              <option>1</option>
+              <option selected>3</option>
+              <option>5</option>
+            </select></label
+          >
+        </div>
+      </div>
+
+      <div id="presets" title="Load/Save presets..">
+        <!-- your preset buttons -->
+        <div id="preset_1" onclick="loadPreset(1)" class="preset-button">1</div>
+        <div id="preset_2" onclick="loadPreset(2)" class="preset-button">2</div>
+        <div id="preset_3" onclick="loadPreset(3)" class="preset-button">3</div>
+      </div>
+    </div>
+
+    <div id="InfoDIV">
+      <div>Square Wave ◻ 1kHz</div>
+      <div>Pulse Width: 90%</div>
+      <div>PWM Resolution: 10 bits</div>
+    </div>
+
+    <script>
+      /* ---------- helper: AJAX GET (promise) ---------- */
+      function ajaxGet(url) {
+        return new Promise(function (resolve, reject) {
+          var xhr = new XMLHttpRequest();
+          xhr.onreadystatechange = function () {
+            if (xhr.readyState !== 4) return;
+            if (xhr.status === 200) resolve(xhr.responseText.trim());
+            else reject(xhr.status);
+          };
+          xhr.open("GET", url, true);
+          xhr.send();
+        });
+      }
+
+      /* ---------- parse frequency string like "1kHz" or "200Hz" or "2.5mHz" ---------- */
+      function parseFrequency(text) {
+        if (!text) return 1000;
+        text = text.toLowerCase().replace(/\s/g, "");
+        var m = text.match(/^([\d\.]+)\s*(m|k|)?hz$/);
+        if (!m) {
+          // try fallback just numeric
+          var num = parseFloat(text);
+          return isNaN(num) ? 1000 : num;
+        }
+        var val = parseFloat(m[1]);
+        var unit = m[2];
+        if (unit === "k") return val * 1000;
+        if (unit === "m") return val * 1e6; // if someone uses m for MHz
+        return val;
+      }
+
+      /* ---------- parse pulse width from status (expects "Pulse Width: 50%") ---------- */
+      function parsePulseFromStatus(statusText) {
+        var m = statusText.match(/Pulse Width:\s*([0-9\.]+)%/i);
+        if (m) return parseFloat(m[1]);
+        return 50;
+      }
+
+      /* ---------- parse resolution (bits) from status ---------- */
+      function parseBitsFromStatus(statusText) {
+        var m = statusText.match(/PWM Resolution:\s*([0-9]+)\s*bits/i);
+        if (m) return parseInt(m[1]);
+        return 6;
+      }
+
+      /* ---------- fetch current settings from device ---------- */
+      async function fetchSettings() {
+        try {
+          var freqTxt = await ajaxGet("frequency"); // human readable
+          var waveTxt = await ajaxGet("wave"); // e.g. "Square", "Sine", "Triangle"
+          var statusTxt = await ajaxGet("status"); // full status (we parse pulse, bits)
+          return {
+            freqHz: parseFrequency(freqTxt),
+            wave: (waveTxt || "Square").toLowerCase(),
+            pulse: parsePulseFromStatus(statusTxt),
+            bits: parseBitsFromStatus(statusTxt),
+            rawFreqText: freqTxt,
+            rawStatus: statusTxt,
+          };
+        } catch (e) {
+          // if device unreachable, keep previous settings or defaults
+          return null;
+        }
+      }
+
+      /* ---------- draw preview on canvas ---------- */
+      async function drawPreview() {
+        const canvas = document.getElementById("preview");
+        const cycles =
+          parseInt(document.getElementById("previewCycles").value) || 3;
+        // size the canvas to container width
+        canvas.width = canvas.clientWidth * devicePixelRatio;
+        canvas.height = canvas.clientHeight * devicePixelRatio;
+        const ctx = canvas.getContext("2d");
+        ctx.scale(devicePixelRatio, devicePixelRatio);
+        // clear background
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, 0, canvas.clientWidth, canvas.clientHeight);
+
+        const settings = await fetchSettings();
+        if (!settings) {
+          ctx.fillStyle = "#ff6b6b";
+          ctx.font = "14px Tahoma";
+          ctx.fillText("Device not reachable", 10, 20);
+          return;
+        }
+
+        // update displayed text fields
+        document.getElementById("FreqValue").innerText =
+          settings.rawFreqText || settings.freqHz + "Hz";
+        document.getElementById("WaveForm").innerText =
+          settings.wave.charAt(0).toUpperCase() + settings.wave.slice(1);
+
+        // drawing parameters
+        const w = canvas.clientWidth;
+        const h = canvas.clientHeight;
+        const midY = h / 2;
+        const amplitude = h * 0.4; // px peak
+        const samplesPerCycle = 256; // resolution of preview
+        const totalSamples = samplesPerCycle * cycles;
+
+        // build samples array (normalized -1..1)
+        const samples = new Float32Array(totalSamples);
+        for (let c = 0; c < cycles; c++) {
+          for (let i = 0; i < samplesPerCycle; i++) {
+            const idx = c * samplesPerCycle + i;
+            const phase = (i / samplesPerCycle) * 2 * Math.PI;
+            if (
+              settings.wave.indexOf("sine") !== -1 ||
+              settings.wave.indexOf("sin") !== -1 ||
+              settings.wave === "s"
+            ) {
+              samples[idx] = Math.sin(phase);
+            } else if (
+              settings.wave.indexOf("tri") !== -1 ||
+              settings.wave === "t"
+            ) {
+              // triangle between -1..1
+              const saw = 2 * (i / samplesPerCycle) - 1; // -1..1
+              samples[idx] = 2 * Math.abs(saw) - 1;
+            } else {
+              // square/rectangle
+              const duty = Math.max(1, Math.min(99, settings.pulse)) / 100.0; // 0..1
+              samples[idx] = i / samplesPerCycle < duty ? 1 : -1;
+            }
+            // apply amplitude quantization if bits provided (for PWM/resolution preview)
+            if (settings.bits && settings.bits > 0) {
+              const levels = Math.pow(2, settings.bits);
+              // map -1..1 to 0..levels-1 then back to -1..1
+              const q = Math.round(((samples[idx] + 1) / 2) * (levels - 1));
+              samples[idx] = (q / (levels - 1)) * 2 - 1;
+            }
+          }
+        }
+
+        // draw grid
+        ctx.strokeStyle = "#073f3a";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        for (let gy = 0; gy <= 4; gy++) {
+          let y = gy * (h / 4);
+          ctx.moveTo(0, y);
+          ctx.lineTo(w, y);
+        }
+        ctx.stroke();
+
+        // draw waveform
+        ctx.strokeStyle = "#38ab45";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (let i = 0; i < totalSamples; i++) {
+          const x = (i / (totalSamples - 1)) * w;
+          const y = midY - samples[i] * amplitude;
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        // draw overlay text (freq, bits, pulse)
+        ctx.fillStyle = "#8fd9a8";
+        ctx.font = "12px Tahoma";
+        const info = `${
+          settings.rawFreqText
+        } • ${settings.wave.toUpperCase()} • PW ${settings.pulse}% • ${
+          settings.bits
+        } bits`;
+        ctx.fillText(info, 8, 14);
+      }
+
+      /* ---------- auto-update handling ---------- */
+      var autoTimer = null;
+      function toggleAuto() {
+        if (autoTimer) {
+          clearInterval(autoTimer);
+          autoTimer = null;
+          document.getElementById("toggleAuto").innerText = "Auto: OFF";
+        } else {
+          autoTimer = setInterval(drawPreview, 800); // update ~ every 800ms
+          document.getElementById("toggleAuto").innerText = "Auto: ON";
+        }
+      }
+
+      /* ---------- initialize on load ---------- */
+      window.addEventListener("load", function () {
+        drawPreview();
+        toggleAuto(); // start with auto ON
+      });
+
+      /* ---------- keep the rest of your existing functions so UI still works ---------- */
+      /* Minimal stubs if original functions already exist on page; if your original page includes them
+   they will be used. Otherwise these helpers keep the preview interacting with the device. */
+
+      function setUP() {
+        var AJAX = new XMLHttpRequest();
+        AJAX.open("GET", "setUP", true);
+        AJAX.send();
+        setTimeout(drawPreview, 400);
+      }
+      function setDOWN() {
+        var AJAX = new XMLHttpRequest();
+        AJAX.open("GET", "setDOWN", true);
+        AJAX.send();
+        setTimeout(drawPreview, 400);
+      }
+      function setSquare() {
+        var AJAX = new XMLHttpRequest();
+        AJAX.open("GET", "setSquare", true);
+        AJAX.send();
+        setTimeout(drawPreview, 400);
+      }
+      function setSine() {
+        var AJAX = new XMLHttpRequest();
+        AJAX.open("GET", "setSine", true);
+        AJAX.send();
+        setTimeout(drawPreview, 400);
+      }
+      function setTriangle() {
+        var AJAX = new XMLHttpRequest();
+        AJAX.open("GET", "setTriangle", true);
+        AJAX.send();
+        setTimeout(drawPreview, 400);
+      }
+      function getStatus() {
+        ajaxGet("status")
+          .then(function (txt) {
+            document.getElementById("InfoDIV").innerHTML = txt.replaceAll(
+              "\n",
+              "<div>"
+            );
+            drawPreview();
+          })
+          .catch(() => {});
+      }
+      function getFrequency() {
+        ajaxGet("frequency")
+          .then(function (txt) {
+            document.getElementById("FreqValue").innerText = txt;
+          })
+          .catch(() => {});
+      }
+      function getWaveForm() {
+        ajaxGet("wave")
+          .then(function (txt) {
+            document.getElementById("WaveForm").innerText = txt;
+          })
+          .catch(() => {});
+      }
+      function loadPreset(n) {
+        var A = new XMLHttpRequest();
+        A.open("GET", "loadPreset?preset=" + n, true);
+        A.send();
+        setTimeout(drawPreview, 400);
+      }
+
+      /* Keep existing console/sendCommand behavior if present in your original page; they will still work. */
+    </script>
+  </body>
+</html>
